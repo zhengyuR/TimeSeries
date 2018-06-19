@@ -1,0 +1,324 @@
+---
+title: "Project"
+author: "Zhengyu Ren"
+date: "12/9/2017"
+output: html_document
+---
+```{r}
+pm <- read.csv('/Users/tama/Downloads/FiveCitiePMData/BeijingPM20100101_20151231.csv')
+
+# sqldf
+require(sqldf)
+pm <- pm[c(1:6, 10, 11:14, 16)]
+colnames(pm)
+max <- sqldf('select *, max("PM_US.post") as pm_us_max from pm group by year,month,day', drv = 'SQLite')
+##Use moving average to avoid NA
+library(imputeTS)
+max$pm_us_max <- na.ma(max$pm_us_max, k = 4, weighting = "simple")
+nrow(max)
+
+#we have missing value from 2015/11/07 to 2015/11/21
+#adpat the data from www.wunderground.com: daily average humidity and transform the pressure from (inhg) to (hPa) 
+
+#training data
+max_train= max[1:2099,]
+#test data
+max_test = max[2100:2191,]
+
+##time series data
+max.ts <- ts(max$pm_us_max, frequency = 365, start=c(2010,1))
+plot(max.ts)
+max_train.ts=ts(max_train$pm_us_max, frequency = 365, start=c(2010,1))
+max.test.ts <- ts(max_test$pm_us_max, frequency = 365, start=c(2015,275))
+```
+
+#graph of individual variables
+```{r}
+par(mfrow = c(2,1))
+plot(ts(max_train$TEMP,frequency = 365, start=c(2010,1)),ylab='temperature')
+plot(ts(max_train$HUMI,frequency = 365, start=c(2010,1)),ylab='humidity')
+plot(ts(max_train$Iws,frequency = 365, start=c(2010,1)),ylab='wind speed')
+plot(ts(max_train$PRES,frequency = 365, start=c(2010,1)),ylab='pressure')
+```
+
+#graph of relationships between variables 
+```{r}
+plot(max_train$TEMP,max_train$pm_us_max,cex=0.5)
+plot(max_train$HUMI,max_train$pm_us_max,cex=0.5)
+plot(max_train$Iws,max_train$pm_us_max,cex=0.5)
+plot(max_train$PRES,max_train$pm_us_max,cex=0.5)
+plot(max_train$DEWP,max_train$pm_us_max,cex=0.5)
+```
+
+
+#ARIMA model without predictors
+```{r}
+library(forecast)
+#Using auto.arima function to automatically select a model
+auto.arima(max_train.ts)#ARIMA(0,1,3)
+
+#Automated Model Selection using AIC
+best.arima <- function(x, maxord = c(1,1,1)){
+  best.aic <- 100000000
+  n <- length(x)
+  for (p in 0:maxord[1]) for(d in 0:maxord[2]) for(q in 0:maxord[3]){
+    fit <- arima(x, order = c(p,d,q))
+    fit.aic <- -2 * fit$loglik + 2 * length(fit$coef)
+    if (fit.aic < best.aic)
+      {
+      best.aic <- fit.aic
+      best.fit <- fit
+      best.model <- c(p,d,q)
+    }
+    }
+  list(best.aic, best.fit, best.model)
+}
+best.arima(max_train.ts, maxord=c(3,3,3))#ARIMA(0,1,3)
+
+fit<-arima(max_train.ts,order=c(0,1,3))
+residual<-resid(fit)
+acf(residual)
+pacf(residual)
+
+frec<- predict(fit, n.ahead=92)
+ts.plot(max_train.ts, frec$pred, col=1:2)
+lines(frec$pred, col=2)
+lines(frec$pred + 1.96*frec$se, lty="dashed", col=4)
+lines(frec$pred - 1.96*frec$se, lty="dashed", col=4)
+
+plot(max.test.ts,ylab="PM2.5",main = "prediction without regressor")
+lines(frec$pred, col = "red")
+lines(frec$pred + 1.96*frec$se, lty="dashed", col=4)
+lines(frec$pred - 1.96*frec$se, lty="dashed", col=4)
+mean((max.test.ts - frec$pred)^2)
+```
+
+For fitting ARIMA model without any regressors. We first try to use auto.arima() function in R that could help us to find appropriate values for the order and degree automatically.It use Hyndman and Khandakar algorithm to minimize AIC, AICc and BIC to obtain the best p, d, q. The output of auto. arima function is ARIMA(0,1,3) which is same as the result we got from the best.arima function(in tutorial7). With p=0, we just having integrated moving average model:IMA(1,3).
+
+#ARIMA model with predictors(temp,iws)
+```{r}
+#Automated Model Selection using AIC
+best.arima <- function(x, maxord = c(1,1,1)){
+  best.aic <- 100000000
+  n <- length(x)
+  for (p in 0:maxord[1]) for(d in 0:maxord[2]) for(q in 0:maxord[3]){
+    fit <- arima(x, order = c(p,d,q),xreg=cbind(max_train$TEMP,max_train$Iws))
+    fit.aic <- -2 * fit$loglik + 2 * length(fit$coef)
+    if (fit.aic < best.aic)
+      {
+      best.aic <- fit.aic
+      best.fit <- fit
+      best.model <- c(p,d,q)
+    }
+    }
+  list(best.aic, best.fit, best.model)
+}
+best.arima(max_train.ts, maxord=c(3,3,3))#ARIMA(0,1,3)
+
+fit<-arima(max_train.ts,order=c(0,1,3),xreg=cbind(max_train$TEMP,max_train$Iws))
+residual<-resid(fit)
+acf(residual)
+pacf(residual)
+
+newtemp=c(max_test$TEMP)
+newiws=c(max_test$Iws)
+newdata=cbind(newtemp,newiws)
+
+frec<- predict(fit, newxreg=newdata, n.ahead=92)
+ts.plot(max_train.ts, frec$pred, col=1:2)
+lines(frec$pred, col=2)
+lines(frec$pred + 1.96*frec$se, lty="dashed", col=4)
+lines(frec$pred - 1.96*frec$se, lty="dashed", col=4)
+
+plot(max.test.ts,ylab="PM2.5",main = "prediction with temp&iws")
+lines(frec$pred, col = "red")
+lines(frec$pred + 1.96*frec$se, lty="dashed", col=4)
+lines(frec$pred - 1.96*frec$se, lty="dashed", col=4)
+mean((max.test.ts - frec$pred)^2)
+```
+
+After adding temperature and cumulated wind speed as regressor we still get ARIMA(0,1,3), but the acf and pacf of the residual seems improved. Although the prediction is still not performing well, it become more sensitive to the decreasing of PM2.5.
+
+
+#ARIMA model with predictors(temp,humi,iws)
+```{r}
+best.arima <- function(x, maxord = c(1,1,1)){
+  best.aic <- 100000000
+  n <- length(x)
+  for (p in 0:maxord[1]) for(d in 0:maxord[2]) for(q in 0:maxord[3]){
+    fit <- arima(x, order = c(p,d,q),xreg=cbind(max_train$TEMP,max_train$HUMI,max_train$Iws))
+    fit.aic <- -2 * fit$loglik + 2 * length(fit$coef)
+    if (fit.aic < best.aic)
+      {
+      best.aic <- fit.aic
+      best.fit <- fit
+      best.model <- c(p,d,q)
+    }
+    }
+  list(best.aic, best.fit, best.model)
+}
+best.arima(max_train.ts, maxord=c(3,3,3))#ARIMA(1,2,2)
+
+fit<-arima(max_train.ts,order=c(1,2,2),xreg=cbind(max_train$TEMP,max_train$HUMI,max_train$Iws))
+residual<-resid(fit)
+acf(residual)
+pacf(residual)
+
+newtemp=c(max_test$TEMP)
+newhumi=c(max_test$HUMI)
+newiws=c(max_test$Iws)
+newdata=cbind(newtemp, newhumi,newiws)
+
+frec<- predict(fit, newxreg=newdata, n.ahead=92)
+ts.plot(max_train.ts, frec$pred, col=1:2)
+lines(frec$pred, col=2)
+lines(frec$pred + 1.96*frec$se, lty="dashed", col=4)
+lines(frec$pred - 1.96*frec$se, lty="dashed", col=4)
+
+plot(max.test.ts, ylab="PM2.5", main = "prediction with temp&humi$iws")
+lines(frec$pred, col = "red")
+lines(frec$pred + 1.96*frec$se, lty="dashed", col=4)
+lines(frec$pred - 1.96*frec$se, lty="dashed", col=4)
+mean((max.test.ts - frec$pred)^2)
+```
+
+This time we add one more predictor humidity, and get out new order ARIMA(1,2,2). The result of ACF and PACF have almost achieved our expectation which is approaching to white noise model.The final prediction also improved a lot.
+
+#ARIMA model with predictors(temp,humi,iws,pres)
+```{r}
+#Automated Model Selection using AIC
+best.arima <- function(x, maxord = c(1,1,1)){
+  best.aic <- 100000000
+  n <- length(x)
+  for (p in 0:maxord[1]) for(d in 0:maxord[2]) for(q in 0:maxord[3]){
+    fit <- arima(x, order = c(p,d,q),xreg=cbind(max_train$TEMP,max_train$HUMI,max_train$Iws,max_train$PRES))
+    fit.aic <- -2 * fit$loglik + 2 * length(fit$coef)
+    if (fit.aic < best.aic)
+      {
+      best.aic <- fit.aic
+      best.fit <- fit
+      best.model <- c(p,d,q)
+    }
+    }
+  list(best.aic, best.fit, best.model)
+}
+best.arima(max_train.ts, maxord=c(3,3,3))#ARIMA(1,2,2)
+
+fit<-arima(max_train.ts,order=c(1,2,2),xreg=cbind(max_train$TEMP,max_train$HUMI,max_train$Iws,max_train$PRES))
+residual<-resid(fit)
+acf(residual)
+pacf(residual)
+
+newtemp=c(max_test$TEMP)
+newhumi=c(max_test$HUMI)
+newiws=c(max_test$Iws)
+newpres=c(max_test$PRES)
+newdata=cbind(newtemp, newhumi,newiws,newpres)
+
+frec<- predict(fit, newxreg=newdata, n.ahead=92)
+ts.plot(max_train.ts, frec$pred, col=1:2)
+lines(frec$pred, col=2)
+lines(frec$pred + 1.96*frec$se, lty="dashed", col=4)
+lines(frec$pred - 1.96*frec$se, lty="dashed", col=4)
+
+plot(max.test.ts,ylab="PM2.5", main = "prediction with temp&humi$iws&pres")
+lines(frec$pred, col = "red")
+lines(frec$pred + 1.96*frec$se, lty="dashed", col=4)
+lines(frec$pred - 1.96*frec$se, lty="dashed", col=4)
+mean((max.test.ts - frec$pred)^2)
+```
+With all predictor temperature, cumulated wind speed, humidity and pressure, we get a little better model. The residual got closer to white noise and the final prediction also appears a little increasing tendency as what we expect.
+#ARIMA model with predictors(temp,humi,iws,pres,dewp)
+```{r}
+#Automated Model Selection using AIC
+best.arima <- function(x, maxord = c(1,1,1)){
+  best.aic <- 100000000
+  n <- length(x)
+  for (p in 0:maxord[1]) for(d in 0:maxord[2]) for(q in 0:maxord[3]){
+    fit <- arima(x, order = c(p,d,q),xreg=cbind(max_train$TEMP,max_train$HUMI,max_train$Iws,max_train$PRES,max_train$DEWP))
+    fit.aic <- -2 * fit$loglik + 2 * length(fit$coef)
+    if (fit.aic < best.aic)
+      {
+      best.aic <- fit.aic
+      best.fit <- fit
+      best.model <- c(p,d,q)
+    }
+    }
+  list(best.aic, best.fit, best.model)
+}
+best.arima(max_train.ts, maxord=c(3,3,3))#ARIMA(1,2,2)
+
+fit<-arima(max_train.ts,order=c(1,2,2),xreg=cbind(max_train$TEMP,max_train$HUMI,max_train$Iws,max_train$PRES,max_train$DEWP))
+residual<-resid(fit)
+acf(residual)
+pacf(residual)
+
+newtemp=c(max_test$TEMP)
+newhumi=c(max_test$HUMI)
+newiws=c(max_test$Iws)
+newpres=c(max_test$PRES)
+newdewp=c(max_test$DEWP)
+newdata=cbind(newtemp, newhumi,newiws,newpres,newdewp)
+
+frec<- predict(fit, newxreg=newdata, n.ahead=92)
+ts.plot(max_train.ts, frec$pred, col=1:2)
+lines(frec$pred, col=2)
+lines(frec$pred + 1.96*frec$se, lty="dashed", col=4)
+lines(frec$pred - 1.96*frec$se, lty="dashed", col=4)
+
+plot(max.test.ts,ylab="PM2.5", main = "prediction with temp&humi$iws&pres")
+lines(frec$pred, col = "red")
+lines(frec$pred + 1.96*frec$se, lty="dashed", col=4)
+lines(frec$pred - 1.96*frec$se, lty="dashed", col=4)
+mean((max.test.ts - frec$pred)^2)
+```
+
+
+
+#ARIMA model with predictors(temp,humi,iws,pres,har)
+```{r}
+library(TSA)
+best.arima <- function(x, maxord = c(1,1,1)){
+  best.aic <- 100000000
+  n <- length(x)
+  for (p in 0:maxord[1]) for(d in 0:maxord[2]) for(q in 0:maxord[3]){
+    har=harmonic(x,1)
+    fit<-arima(x,order=c(p,d,q),xreg=cbind(max_train$TEMP,max_train$HUMI,max_train$Iws,max_train$PRES,har))
+    fit.aic <- -2 * fit$loglik + 2 * length(fit$coef)
+    if (fit.aic < best.aic)
+      {
+      best.aic <- fit.aic
+      best.fit <- fit
+      best.model <- c(p,d,q)
+    }
+    }
+  list(best.aic, best.fit, best.model)
+}
+best.arima(max_train.ts, maxord=c(3,3,3))
+
+#ARIMA(1,1,1)
+
+har=harmonic(max_train.ts,1)
+fit<-arima(max_train.ts,order=c(1,1,1),xreg=cbind(max_train$TEMP,max_train$HUMI,max_train$Iws,max_train$PRES,har))
+tsdisplay(residuals(fit))
+
+newtemp=c(max_test$TEMP)
+newhumi=c(max_test$HUMI)
+newiws=c(max_test$Iws)
+newpres=c(max_test$PRES)
+newhar=harmonic(ts(rep(1,92), start=c(2010,1),freq=365),1)
+newdata=cbind(newtemp, newhumi,newiws,newpres,newhar)
+
+frec<- predict(fit, newxreg=newdata, n.ahead=92)
+ts.plot(max_train.ts, frec$pred, col=1:2)
+lines(frec$pred + 1.96*frec$se, lty="dashed", col=4)
+lines(frec$pred - 1.96*frec$se, lty="dashed", col=4)
+
+plot(max.test.ts,ylab="PM2.5", main = "prediction with temp&humi$iws&pres$har")
+lines(frec$pred, col = "red")
+lines(frec$pred + 1.96*frec$se, lty="dashed", col=4)
+lines(frec$pred - 1.96*frec$se, lty="dashed", col=4)
+
+mean((max.test.ts - frec$pred)^2)
+```
+Since the arima() function will allow a seasonal period up to m=350, we decide to create the harmonic functions over the period of forecast.
